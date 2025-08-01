@@ -1,1 +1,166 @@
+*Assumptions:- 
 
+   - There are Sequelize models named: Product, Inventory, Warehouse, Supplier, InventoryChangeLog, and StockThreshold.
+   - Product has fields: id, name, sku, productType, primarySupplierId, companyId.
+   - Inventory links productId + warehouseId and stores quantity.
+   - Warehouse belongs to a companyId.
+   - InventoryChangeLog tracks changes with productId, warehouseId, changedAt, quantityChange, changeType (e.g., “sale”).
+   - StockThreshold table maps productType → threshold value.
+   - Recent sales means at least one sale (changeType="sale") in last 30 days.
+   - Supplier info is in Supplier model, linked from Product.primarySupplierId.
+
+Code:- 
+
+const express = require('express');
+const { Op, fn, col } = require('sequelize');
+const moment = require('moment');
+
+const app = express();
+
+// Assuming these Sequelize models are defined and associated properly
+const { Product, Inventory, Warehouse, Supplier, InventoryChangeLog, StockThreshold } = require('./models');
+
+app.get('/api/companies/:companyId/alerts/low-stock', async (req, res) => {
+  const companyId = parseInt(req.params.companyId, 10);
+  if (isNaN(companyId)) {
+    return res.status(400).json({ error: 'Invalid companyId' });
+  }
+
+  const RECENT_DAYS = 30;
+  const recentDate = moment.utc().subtract(RECENT_DAYS, 'days').toDate();
+
+  try {
+    // Step 1: Load all stock thresholds into a map for quick lookup
+    const thresholdsData = await StockThreshold.findAll();
+    const thresholdMap = {};
+    thresholdsData.forEach(t => {
+      thresholdMap[t.productType] = t.threshold;
+    });
+
+    // Step 2: Query recent sales grouped by product and warehouse
+    const sales = await InventoryChangeLog.findAll({
+      where: {
+        changeType: 'sale',
+        changedAt: { [Op.gte]: recentDate }
+      },
+      attributes: [
+        'productId',
+        'warehouseId',
+        [fn('ABS', fn('SUM', col('quantityChange'))), 'unitsSold'],
+        [fn('MAX', col('changedAt')), 'lastSale']
+      ],
+      group: ['productId', 'warehouseId'],
+      raw: true
+    });
+
+    // Create lookup for sales: "productId-warehouseId" → unitsSold
+    const salesLookup = {};
+    sales.forEach(s => {
+      salesLookup[`${s.productId}-${s.warehouseId}`] = {
+        unitsSold: parseInt(s.unitsSold, 10),
+        lastSale: s.lastSale
+      };
+    });
+
+    // Step 3: Query inventory with product, warehouse, and supplier data for given company
+    const inventories = await Inventory.findAll({
+      include: [
+        {
+          model: Product,
+          where: { companyId },
+          attributes: ['id', 'name', 'sku', 'productType', 'primarySupplierId']
+        },
+        {
+          model: Warehouse,
+          where: { companyId },
+          attributes: ['id', 'name']
+        },
+        {
+          model: Supplier,
+          as: 'supplier',
+          attributes: ['id', 'name', ['contactEmail', 'contact_email']]
+        }
+      ],
+      raw: true,
+      nest: true
+    });
+
+    // Step 4: Filter alerts based on conditions
+    const alerts = [];
+
+    for (const inv of inventories) {
+      const product = inv.Product;
+      const warehouse = inv.Warehouse;
+      const supplier = inv.supplier;
+
+      if (!product || !warehouse) continue; // safety check
+
+      const key = `${product.id}-${warehouse.id}`;
+      const salesInfo = salesLookup[key];
+      if (!salesInfo) continue; // no recent sales -> no alert
+
+      const threshold = thresholdMap[product.productType];
+      if (threshold === undefined) continue; // missing threshold -> skip
+
+      const currentStock = inv.quantity;
+
+      if (currentStock >= threshold) continue; // stock above threshold -> no alert
+
+      // Calculate days until stockout based on average daily sales
+      const dailySales = salesInfo.unitsSold / RECENT_DAYS;
+      const daysUntilStockout = dailySales > 0 ? Math.floor(currentStock / dailySales) : null;
+
+      alerts.push({
+        product_id: product.id,
+        product_name: product.name,
+        sku: product.sku,
+        warehouse_id: warehouse.id,
+        warehouse_name: warehouse.name,
+        current_stock: currentStock,
+        threshold,
+        days_until_stockout: daysUntilStockout,
+        supplier: supplier ? {
+          id: supplier.id,
+          name: supplier.name,
+          contact_email: supplier.contact_email
+        } : null
+      });
+    }
+
+    return res.json({
+      alerts,
+      total_alerts: alerts.length
+    });
+
+  } catch (error) {
+    console.error('Error in low-stock alerts:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// App listen (port can be changed as needed)
+app.listen(3000, () => console.log('Server running on port 3000'));
+
+
+*Edge Cases:- 
+
+    - Invalid company ID param → 400 error.
+    - Products with no recent sales → excluded.
+    - Products with no threshold defined → excluded.
+    - Dividing by zero average sales avoided by checking sales > 0.
+    - Missing supplier info handled by returning supplier: null.
+    - Any unexpected errors lead to a 500 response with server log.
+
+*Explain :- 
+
+  - First, I get the companyId from the URL and check if it’s valid.
+  - Then, I load stock thresholds for each product type from the database so we know what the low stock cutoff is.
+  - Next, I find products with recent sales in the last 30 days by querying InventoryChangeLog for sales in that window, grouping by product and warehouse.
+  - I use a lookup from these sales to quickly check if a product in a warehouse had recent sales.
+  - Then, I get the current inventory of products in warehouses belonging to the company, including supplier info.
+  - For each inventory record, I check:
+  - If recent sales exist for that product and warehouse.
+  - If the current stock is less than the threshold for the product’s type.
+  - For alerts, I calculate how many days are left before stock runs out using average sales per day.
+  - I put all that info into the response including supplier contact for reordering.
+  - If anything goes wrong (bad input, DB error), I handle it gracefully and send an error response

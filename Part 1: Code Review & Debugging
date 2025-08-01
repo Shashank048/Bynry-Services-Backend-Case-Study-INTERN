@@ -1,1 +1,126 @@
+Code :-  
 
+@app.route('/api/products', methods=['POST'])
+def create_product():
+data = request.json
+# Create new product
+product = Product(
+name=data['name'],
+sku=data['sku'],
+price=data['price'],
+warehouse_id=data['warehouse_id']
+)
+db.session.add(product)
+db.session.commit()
+# Update inventory count
+inventory = Inventory(
+product_id=product.id,
+warehouse_id=data['warehouse_id'],
+quantity=data['initial_quantity']
+)
+db.session.add(inventory)
+db.session.commit()
+return {"message": "Product created", "product_id": product.id}
+
+
+Solution :- 
+
+1. Identify Issues:  
+    -  No input validation: The code assumes all fields exist and are valid. It does not check if data['name'], data['sku'], data['price'], or inventory fields are present or correct types.
+    -  SKU uniqueness not checked: It does not verify if the SKU is already used in the database.
+    -  Price handled incorrectly: Price could be a string or float but should be stored precisely as decimal type.
+    -  Wrong product model fields: warehouse_id likely does not belong on the product itself since a product can exist in many warehouses.
+    -  Separate commits: Product and inventory are committed separately, so failure in second commit leaves inconsistent state.
+    -  No error handling: Exceptions may cause the entire request to crash and result in 500 errors.
+    -  Initial quantity handling: The inventory creation assumes initial_quantity is passed and valid but doesn’t verify that.
+    -  Doesn't support multiple warehouses: The code creates a product tied to one warehouse only. 
+
+2. Explain Impact:
+    - No validation: Can cause crashes if required fields are missing or wrong types are passed.
+    - SKU duplication: Can cause data conflicts or breaks SKU uniqueness business rule.
+    - Improper price precision: Could cause rounding errors or incorrect pricing.
+    - Wrong relationship: Associating warehouse directly with product restricts multi-warehouse fulfillment.
+    - Separate commits: If inventory commit fails, product exists without inventory, causing data inconsistency.
+    - No error handling: Makes debugging harder and responds poorly to client.
+    - Inventory initial quantity assumptions: Could cause KeyError or incorrect inventory record.
+    - Single warehouse constraint: Cannot add products to multiple warehouses later, contradicting requirements.
+
+3. Provide Fixes:
+     Code :-  
+
+from flask import request, jsonify
+from decimal import Decimal, InvalidOperation
+from sqlalchemy.exc import IntegrityError
+from app import db, app
+from models import Product, Inventory
+
+@app.route('/api/products', methods=['POST'])
+def create_product():
+    data = request.json or {}
+
+    # Validate required fields
+    required_fields = ['name', 'sku', 'price']
+    missing = [field for field in required_fields if field not in data]
+    if missing:
+        return jsonify({'error': f'Missing fields: {", ".join(missing)}'}), 400
+
+    # Validate and convert price to Decimal
+    try:
+        price = Decimal(str(data['price']))
+    except (InvalidOperation, ValueError):
+        return jsonify({'error': 'Price must be a valid decimal number'}), 400
+
+    # Check SKU uniqueness
+    if Product.query.filter_by(sku=data['sku']).first():
+        return jsonify({'error': 'SKU already exists'}), 409
+
+    # Create product without warehouse_id, since product is global
+    product = Product(
+        name=data['name'],
+        sku=data['sku'],
+        price=price
+    )
+
+    # Start DB transaction
+    try:
+        db.session.add(product)
+        db.session.flush()  # get product.id
+
+        # Add inventory if provided (optional)
+        inventories = data.get('inventories')
+        if inventories and isinstance(inventories, list):
+            for inv in inventories:
+                warehouse_id = inv.get('warehouse_id')
+                quantity = inv.get('initial_quantity', 0)
+
+                if warehouse_id is None:
+                    return jsonify({'error': 'warehouse_id is required in inventories'}), 400
+                if not isinstance(quantity, int) or quantity < 0:
+                    return jsonify({'error': 'initial_quantity must be a non-negative integer'}), 400
+
+                inventory = Inventory(
+                    product_id=product.id,
+                    warehouse_id=warehouse_id,
+                    quantity=quantity
+                )
+                db.session.add(inventory)
+
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'error': 'Database error, possibly invalid warehouse or duplicate SKU'}), 400
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+    return jsonify({'message': 'Product created', 'product_id': product.id}), 201
+
+   Explanation :- 
+        - We validate required fields and data types to avoid errors in processing.
+        - Use Decimal for price to ensure monetary precision.
+        - Ensure the SKU is unique before inserting.
+        - We remove warehouse_id from product since products exist independently from warehouses.
+        - Inventories can be optionally passed as a list of {warehouse_id, initial_quantity}, supporting multiple warehouses.
+        - Wrap all DB operations in a single transaction. Flush allows us to obtain the product ID before inventory is added.
+        - Handle and return errors with clear messages and proper HTTP status codes.
+        - This approach meets business rules (unique SKUs, multi-warehouse support) and handles optional fields safely.

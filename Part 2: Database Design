@@ -1,1 +1,83 @@
+* Design Schema:- I will write the table definitions using simple SQL DDL to clearly show columns, data types, and relationships.
 
+1. Company table :- 
+
+CREATE TABLE company (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL UNIQUE
+);
+
+2. Warehouse table:- 
+
+CREATE TABLE warehouse (
+    id SERIAL PRIMARY KEY,
+    company_id INTEGER NOT NULL REFERENCES company(id),
+    name VARCHAR(255) NOT NULL,
+    location VARCHAR(255)  -- optional to store address or description
+);
+
+3. Product table:- 
+
+CREATE TABLE product (
+    id SERIAL PRIMARY KEY,
+    company_id INTEGER NOT NULL REFERENCES company(id),
+    sku VARCHAR(100) NOT NULL UNIQUE,
+    name VARCHAR(255) NOT NULL,
+    price NUMERIC(12, 2) NOT NULL,
+    is_bundle BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+4. Inventory table:- 
+    (This shows product quantities per warehouse) 
+
+CREATE TABLE inventory (
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES product(id),
+    warehouse_id INTEGER NOT NULL REFERENCES warehouse(id),
+    quantity INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(product_id, warehouse_id)
+);
+
+5. InventoryChangeLog table:- 
+(To record every inventory level change)
+
+CREATE TABLE inventory_change_log (
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES product(id),
+    warehouse_id INTEGER NOT NULL REFERENCES warehouse(id),
+    changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    quantity_change INTEGER NOT NULL,     
+    reason VARCHAR(255)                    
+);
+
+6. Supplier table:- 
+
+CREATE TABLE supplier (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    contact_email VARCHAR(255)          
+);
+
+7. SupplierProduct table:- 
+   (To represent bundle products containing multiple child products)
+
+CREATE TABLE product_bundle (
+    bundle_product_id INTEGER NOT NULL REFERENCES product(id),
+    child_product_id INTEGER NOT NULL REFERENCES product(id),
+    quantity INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY(bundle_product_id, child_product_id)
+);
+
+*  Identify Gaps:- 
+     - Can suppliers be linked to specific warehouses, or only to companies?
+     - Is price per product fixed or should it be tracked per supplier or warehouse?
+     - On selling a bundle, should inventory be automatically reduced for component products?
+     - Are there additional attributes needed for warehouses or suppliers (e.g., address, phone)?
+     - Should we keep track of user or process who made the inventory changes?
+
+*  Explain Design Decisions:- 
+     - Primary and Foreign Keys: Enforce data integrity and relationships between tables.
+     - Unique Constraints: SKU uniqueness, and unique (product_id, warehouse_id) in inventory ensures no duplicate stock records.
+     - NUMERIC(12,2) for price: Accurate decimal representation for money.
+     - Boolean is_bundle field: Easily flags products that are bundles.
+     - Extensibility: The schema is flexible for future features like nested bundles, supplier pricing, or inventory batches.
